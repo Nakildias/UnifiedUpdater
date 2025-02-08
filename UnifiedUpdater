@@ -59,7 +59,7 @@ read -p "Press enter to exit"
 }
 
 update_debian() {
-check_boot_partition
+#check_boot_partition
 echo "Checking if /boot partition is mounted..."
 echo "Found $PACKAGES_DEBIAN"
 sudo apt update
