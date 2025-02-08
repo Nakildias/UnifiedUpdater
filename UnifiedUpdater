@@ -75,7 +75,7 @@ fi
 clean_debian() {
 echo "Removing unused packages"
 sudo apt-get autoremove --purge
-echo "Deleting Pacman Cache"
+echo "Deleting APT Cache"
 echo "$(du -sh /var/cache/apt/archives)"
 sudo apt autoclean
 sudo apt clean
