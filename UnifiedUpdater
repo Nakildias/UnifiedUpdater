@@ -1,0 +1,163 @@
+#!/bin/bash
+
+update_disk_info() {
+DISK_USAGE=$(df /)
+DISK_USED_GiB=$(echo "$DISK_USAGE" | awk 'NR==2{print $3}' | awk '{printf "%.2f", $1 / 1024 / 1024}')
+DISK_FREE_GiB=$(echo "$DISK_USAGE" | awk 'NR==2{print $4}' | awk '{printf "%.2f", $1 / 1024 / 1024}')
+DISK_TOTAL_GiB=$(awk "BEGIN {print $DISK_USED_GiB + $DISK_FREE_GiB}")
+DISK_USAGE_PERCENTAGE=$(echo "$DISK_USAGE" | awk 'NR==2{print $5}' | sed 's/%//g' | bc)
+DISK_AVAILABLE_BEFORE="$DISK_USED_GiB / $DISK_TOTAL_GiB"
+DISK_USAGE_BEFORE=$DISK_USED_GiB
+}
+
+check_boot_partition() {
+echo "Checking if /boot partition is mounted..."
+echo "Having a mounted /boot partition is important when performing a kernel update"
+if mountpoint -q /boot; then
+    echo "/boot is properly mounted."
+else
+    echo "Warning: /boot is NOT mounted!"
+    exit 1
+fi
+read -p "Press enter to continue..."
+}
+
+update_arch() {
+check_boot_partition
+echo "Found $PACKAGES_ARCH"
+sudo pacman -Syu
+check_flatpak
+
+read -p "Clean up? [y/n] " CLEANUP_ARCH
+if [ "$CLEANUP_ARCH" == "y" ]; then
+update_disk_info
+clean_arch
+fi
+}
+
+clean_arch() {
+echo "Removing unused packages"
+sudo pacman -R $(pacman -Qtdq) --noconfirm
+echo "Deleting Pacman Cache"
+echo "$(du -sh /var/cache/pacman/pkg/)"
+sudo pacman -Scc --noconfirm # & Those installed
+echo "Deleting cache... ~/.cache"
+echo "$(du -sh ~/.cache)"
+rm -rf ~/.cache
+DISK_USAGE=$(df /)
+DISK_USED_GiB=$(echo "$DISK_USAGE" | awk 'NR==2{print $3}' | awk '{printf "%.2f", $1 / 1024 / 1024}')
+DISK_FREE_GiB=$(echo "$DISK_USAGE" | awk 'NR==2{print $4}' | awk '{printf "%.2f", $1 / 1024 / 1024}')
+DISK_TOTAL_GiB=$(awk "BEGIN {print $DISK_USED_GiB + $DISK_FREE_GiB}")
+DISK_USAGE_PERCENTAGE=$(echo "$DISK_USAGE" | awk 'NR==2{print $5}' | sed 's/%//g' | bc)
+DISK_AVAILABLE_AFTER="$DISK_USED_GiB / $DISK_TOTAL_GiB"
+DISK_USAGE_AFTER=$DISK_USED_GiB
+echo "Size before cleaning $DISK_AVAILABLE_BEFORE GiB"
+echo "Size after cleaning $DISK_AVAILABLE_AFTER GiB"
+RESULT=$(bc -l <<< "scale=2; $DISK_USAGE_BEFORE - $DISK_USAGE_AFTER")
+echo "[+] $RESULT GiB"
+read -p "Press enter to exit"
+}
+
+update_debian() {
+check_boot_partition
+echo "Checking if /boot partition is mounted..."
+echo "Found $PACKAGES_DEBIAN"
+sudo apt update
+sudo apt upgrade
+check_flatpak
+read -p "Clean up? [y/n] " CLEANUP_DEBIAN
+if [ "$CLEANUP_DEBIAN" == "y" ]; then
+update_disk_info
+clean_debian
+fi
+}
+
+clean_debian() {
+echo "Removing unused packages"
+sudo apt-get autoremove --purge
+echo "Deleting Pacman Cache"
+echo "$(du -sh /var/cache/apt/archives)"
+sudo apt autoclean
+sudo apt clean
+echo "Deleting cache... ~/.cache"
+echo "$(du -sh ~/.cache)"
+rm -rf ~/.cache
+DISK_USAGE=$(df /)
+DISK_USED_GiB=$(echo "$DISK_USAGE" | awk 'NR==2{print $3}' | awk '{printf "%.2f", $1 / 1024 / 1024}')
+DISK_FREE_GiB=$(echo "$DISK_USAGE" | awk 'NR==2{print $4}' | awk '{printf "%.2f", $1 / 1024 / 1024}')
+DISK_TOTAL_GiB=$(awk "BEGIN {print $DISK_USED_GiB + $DISK_FREE_GiB}")
+DISK_USAGE_PERCENTAGE=$(echo "$DISK_USAGE" | awk 'NR==2{print $5}' | sed 's/%//g' | bc)
+DISK_AVAILABLE_AFTER="$DISK_USED_GiB / $DISK_TOTAL_GiB"
+DISK_USAGE_AFTER=$DISK_USED_GiB
+echo "Size before cleaning $DISK_AVAILABLE_BEFORE GiB"
+echo "Size after cleaning $DISK_AVAILABLE_AFTER GiB"
+RESULT=$(bc -l <<< "scale=2; $DISK_USAGE_BEFORE - $DISK_USAGE_AFTER")
+echo "[+] $RESULT GiB"
+read -p "Press enter to exit"
+}
+
+update_fedora() {
+check_boot_partition
+echo "Checking if /boot partition is mounted..."
+echo "Found $PACKAGES_FEDORA"
+sudo dnf update
+check_flatpak
+read -p "Clean up? [y/n] " CLEANUP_FEDORA
+if [ "$CLEANUP_FEDORA" == "y" ]; then
+update_disk_info
+clean_fedora
+fi
+}
+
+clean_fedora() {
+echo "Removing unused packages"
+sudo pacman -R $(pacman -Qtdq) --noconfirm
+echo "Deleting Pacman Cache"
+echo "$(du -sh /var/cache/pacman/pkg/)"
+sudo pacman -Scc --noconfirm # & Those installed
+echo "Deleting cache... ~/.cache"
+echo "$(du -sh ~/.cache)"
+rm -rf ~/.cache
+DISK_USAGE=$(df /)
+DISK_USED_GiB=$(echo "$DISK_USAGE" | awk 'NR==2{print $3}' | awk '{printf "%.2f", $1 / 1024 / 1024}')
+DISK_FREE_GiB=$(echo "$DISK_USAGE" | awk 'NR==2{print $4}' | awk '{printf "%.2f", $1 / 1024 / 1024}')
+DISK_TOTAL_GiB=$(awk "BEGIN {print $DISK_USED_GiB + $DISK_FREE_GiB}")
+DISK_USAGE_PERCENTAGE=$(echo "$DISK_USAGE" | awk 'NR==2{print $5}' | sed 's/%//g' | bc)
+DISK_AVAILABLE_AFTER="$DISK_USED_GiB / $DISK_TOTAL_GiB"
+DISK_USAGE_AFTER=$DISK_USED_GiB
+echo "Size before cleaning $DISK_AVAILABLE_BEFORE GiB"
+echo "Size after cleaning $DISK_AVAILABLE_AFTER GiB"
+RESULT=$(bc -l <<< "scale=2; $DISK_USAGE_BEFORE - $DISK_USAGE_AFTER")
+echo "[+] $RESULT GiB"
+read -p "Press enter to exit"
+}
+
+check_flatpak() {
+if command -v flatpak &> /dev/null; then
+PACKAGES_FLATPAK="$(flatpak list | wc -l) (flatpaks)"
+update_flatpak
+fi
+}
+
+update_flatpak() {
+echo "Checking if /boot partition is mounted..."
+echo "Found $PACKAGES_FLATPAK"
+flatpak update
+}
+
+
+if command -v pacman &> /dev/null; then
+PACKAGES_ARCH="$(pacman -Q | wc -l) (pacman)"
+update_arch
+fi
+
+if command -v apt &> /dev/null; then
+PACKAGES_DEBIAN="$(dpkg --list | wc -l) (apt)"
+update_debian
+fi
+
+if command -v dnf &> /dev/null; then
+PACKAGES_FEDORA="$(dnf list installed | wc -l) (dnf)"
+update_fedora
+fi
+
