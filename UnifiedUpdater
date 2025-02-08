@@ -111,10 +111,10 @@ fi
 
 clean_fedora() {
 echo "Removing unused packages"
-sudo pacman -R $(pacman -Qtdq) --noconfirm
-echo "Deleting Pacman Cache"
-echo "$(du -sh /var/cache/pacman/pkg/)"
-sudo pacman -Scc --noconfirm # & Those installed
+sudo dnf autoremove
+echo "Deleting DNF Cache"
+echo "$(du -sh /var/cache/dnf)"
+sudo dnf clean # & Those installed
 echo "Deleting cache... ~/.cache"
 echo "$(du -sh ~/.cache)"
 rm -rf ~/.cache
