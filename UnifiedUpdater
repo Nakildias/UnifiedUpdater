@@ -101,6 +101,7 @@ check_boot_partition
 echo "Checking if /boot partition is mounted..."
 echo "Found $PACKAGES_FEDORA"
 sudo dnf update
+sudo dnf upgrade
 check_flatpak
 read -p "Clean up? [y/n] " CLEANUP_FEDORA
 if [ "$CLEANUP_FEDORA" == "y" ]; then
