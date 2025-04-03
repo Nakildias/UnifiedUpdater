@@ -1,378 +1,330 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Script to update system packages (Arch, Debian, Fedora) and Flatpaks,
-# with an option to clean up caches and unused packages.
+# === Configuration ===
+# Set to true to automatically run cleanup tasks, false to skip.
+# Can be overridden with --clean or --no-clean arguments.
+AUTO_CLEANUP=false
+# Set to true to automatically confirm package manager upgrades (USE WITH CAUTION).
+# Can be overridden with --yes or -y argument.
+AUTO_CONFIRM_UPGRADES=false
 
-# --- Configuration ---
-# Set to true to enable colored output, false to disable
-USE_COLORS=true
-# Set to false to skip the /boot mount check
-CHECK_BOOT_MOUNT=true
-# Set to false to skip cleaning ~/.cache
-CLEAN_USER_CACHE=true
+# === Colors ===
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[0;37m'
+BOLD='\033[1m'
+NC='\033[0m' # No Color
 
-# --- Colors and Formatting (Optional) ---
-# Check if connected to a terminal and USE_COLORS is true
-if $USE_COLORS && [[ -t 1 ]]; then
-  CLR_RESET='\033[0m'
-  CLR_INFO='\033[1;34m'    # Blue Bold
-  CLR_SUCCESS='\033[1;32m' # Green Bold
-  CLR_WARNING='\033[1;33m' # Yellow Bold
-  CLR_ERROR='\033[1;31m'   # Red Bold
-  CLR_BOLD='\033[1m'
-else
-  CLR_RESET=''
-  CLR_INFO=''
-  CLR_SUCCESS=''
-  CLR_WARNING=''
-  CLR_ERROR=''
-  CLR_BOLD=''
+# === Helper Functions ===
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+log_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1" >&2
+}
+
+log_cmd() {
+    echo -e "${PURPLE}[CMD]${NC} $1"
+}
+
+# Function to run commands and check exit status
+run_command() {
+    log_cmd "$1"
+    eval "$1" # Using eval to handle complex commands with pipes/redirects if needed, use cautiously
+    local status=$?
+    if [ $status -ne 0 ]; then
+        log_error "Command failed with status $status: $1"
+        # Decide if you want to exit on failure
+        # exit $status
+    fi
+    return $status
+}
+
+# Get disk usage info (Used GiB, Total GiB) for a given mount point (default /)
+get_disk_info() {
+    local mount_point="${1:-/}"
+    # df outputs Used and Size in KiB blocks by default with --output
+    local disk_info=$(df --output=used,size "$mount_point" | awk 'NR==2')
+    local disk_used_kib=$(echo "$disk_info" | awk '{print $1}')
+    local disk_total_kib=$(echo "$disk_info" | awk '{print $2}')
+
+    local disk_used_gib=$(awk "BEGIN {printf \"%.2f\", $disk_used_kib / 1024 / 1024}")
+    local disk_total_gib=$(awk "BEGIN {printf \"%.2f\", $disk_total_kib / 1024 / 1024}")
+
+    echo "$disk_used_gib $disk_total_gib"
+}
+
+# Calculate and display disk space saved
+display_disk_saved() {
+    local usage_before_gib=$1
+    local total_before_gib=$2
+    local usage_after_gib=$3
+    local total_after_gib=$4 # Usually same as before, but recalculate just in case
+
+    log_info "Disk Usage Before: ${usage_before_gib} GiB / ${total_before_gib} GiB"
+    log_info "Disk Usage After:  ${usage_after_gib} GiB / ${total_after_gib} GiB"
+    local saved_gib=$(bc -l <<< "scale=2; $usage_before_gib - $usage_after_gib")
+
+    if (( $(echo "$saved_gib > 0" | bc -l) )); then
+        log_success "Freed up ${saved_gib} GiB of disk space."
+    elif (( $(echo "$saved_gib == 0" | bc -l) )); then
+        log_info "No significant disk space freed up by cleaning."
+    else
+        # This shouldn't normally happen unless something wrote data during cleanup
+        log_warning "Disk usage increased by ${saved_gib#-} GiB after cleaning."
+    fi
+}
+
+# === Core Functions ===
+
+check_boot_partition() {
+    log_info "Checking /boot partition..."
+    if mountpoint -q /boot; then
+        log_success "/boot is mounted."
+        return 0
+    else
+        log_warning "/boot is NOT mounted. This might cause issues if a kernel update occurs."
+        # Decide if this should be fatal
+        # read -p "Press Enter to continue despite warning, or Ctrl+C to abort..."
+        return 1 # Indicate a potential issue
+    fi
+}
+
+update_os() {
+    local pm=$1
+    local update_cmd=$2
+    local upgrade_cmd=$3
+    local package_count_cmd=$4
+    local packages_desc=$5
+    local confirm_flag=$6
+
+    local package_count=$(eval "$package_count_cmd")
+    log_info "Detected $pm ($package_count $packages_desc)"
+
+    log_info "Updating package lists..."
+    run_command "sudo $update_cmd" || return 1 # Stop if update fails
+
+    log_info "Upgrading packages..."
+    run_command "sudo $upgrade_cmd $confirm_flag" || return 1 # Stop if upgrade fails
+
+    log_success "$pm package upgrade complete."
+    return 0
+}
+
+clean_os() {
+    local pm=$1
+    local autoremove_cmd=$2
+    local clean_cache_cmd=$3
+    local cache_path=$4
+    local cache_size_cmd="du -sh $cache_path 2>/dev/null || echo '0K'" # Handle non-existent cache
+
+    log_info "Starting cleanup for $pm..."
+
+    if [ -n "$autoremove_cmd" ]; then
+        log_info "Removing unused packages..."
+        run_command "sudo $autoremove_cmd"
+    fi
+
+    if [ -n "$clean_cache_cmd" ]; then
+        log_info "Cleaning package manager cache ($cache_path)..."
+        local cache_size_before=$(eval "$cache_size_cmd")
+        log_info "Cache size before: $cache_size_before"
+        run_command "sudo $clean_cache_cmd"
+        local cache_size_after=$(eval "$cache_size_cmd")
+        log_info "Cache size after: $cache_size_after"
+    fi
+
+    log_info "Cleaning user cache (~/.cache)..."
+    if [ -d "$HOME/.cache" ]; then
+        local user_cache_size_before=$(du -sh "$HOME/.cache" 2>/dev/null)
+        log_info "User cache size before: $user_cache_size_before"
+        run_command "rm -rf $HOME/.cache/*" # Clear contents instead of removing the dir itself
+        local user_cache_size_after=$(du -sh "$HOME/.cache" 2>/dev/null)
+        log_info "User cache size after: $user_cache_size_after"
+    else
+       log_info "User cache directory (~/.cache) not found."
+    fi
+
+    log_success "$pm cleanup complete."
+}
+
+update_flatpak() {
+    if command -v flatpak &> /dev/null; then
+        log_info "Checking for Flatpak updates..."
+        local flatpak_count=$(flatpak list | wc -l)
+        if [ "$flatpak_count" -gt 0 ]; then
+             log_info "Found $flatpak_count Flatpak packages."
+             run_command "flatpak update $FLATPAK_CONFIRM_FLAG" # Add -y if needed
+        else
+             log_info "No Flatpaks installed."
+        fi
+    else
+        log_info "Flatpak not installed."
+    fi
+}
+
+# === Argument Parsing ===
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        -c|--clean) AUTO_CLEANUP=true; ;;
+        --no-clean) AUTO_CLEANUP=false; ;;
+        -y|--yes) AUTO_CONFIRM_UPGRADES=true; ;;
+        -h|--help)
+            echo "Usage: $0 [--clean | --no-clean] [-y | --yes] [-h | --help]"
+            echo "  --clean      Perform cleanup tasks after updates (overrides config)."
+            echo "  --no-clean   Skip cleanup tasks (overrides config)."
+            echo "  -y, --yes    Automatically confirm package manager upgrades (use with caution)."
+            echo "  -h, --help   Show this help message."
+            exit 0
+            ;;
+        *) log_warning "Unknown parameter passed: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+# Determine confirmation flags based on AUTO_CONFIRM_UPGRADES
+PACMAN_CONFIRM_FLAG=""
+APT_CONFIRM_FLAG=""
+DNF_CONFIRM_FLAG=""
+FLATPAK_CONFIRM_FLAG=""
+
+if [ "$AUTO_CONFIRM_UPGRADES" = true ]; then
+    log_warning "AUTO-CONFIRMING package upgrades!"
+    PACMAN_CONFIRM_FLAG="--noconfirm"
+    APT_CONFIRM_FLAG="-y"
+    DNF_CONFIRM_FLAG="-y"
+    FLATPAK_CONFIRM_FLAG="-y"
 fi
 
-# --- Helper Functions ---
-info() {
-  echo -e "${CLR_INFO}[INFO]${CLR_RESET} $*"
-}
+# === Main Execution ===
 
-success() {
-  echo -e "${CLR_SUCCESS}[SUCCESS]${CLR_RESET} $*"
-}
+echo -e "${BOLD}${CYAN}=== System Update Script ===${NC}"
+log_info "Date: $(date)"
+log_info "Auto-Cleanup: ${AUTO_CLEANUP}"
+log_info "Auto-Confirm Upgrades: ${AUTO_CONFIRM_UPGRADES}"
+echo "-----------------------------"
 
-warning() {
-  echo -e "${CLR_WARNING}[WARNING]${CLR_RESET} $*"
-}
+# --- Pre-checks ---
+if [ "$EUID" -eq 0 ]; then
+  log_error "This script should not be run as root. It uses 'sudo' where needed."
+  exit 1
+fi
 
-error() {
-  echo -e "${CLR_ERROR}[ERROR]${CLR_RESET} $*" >&2
-}
-
-# Check if running as root, prompt if not using sudo prefix
-check_sudo() {
-    # Use global scope for SUDO or pass it back if preferred
-    declare -g SUDO # Ensure SUDO is globally accessible from this function
-
-    if [[ $EUID -ne 0 ]]; then
-        if ! command -v sudo &>/dev/null; then
-            error "sudo command not found, and script not run as root. Please install sudo or run as root."
-            exit 1
-        fi
-        SUDO="sudo"
-        info "Using sudo for privileged operations."
-    else
-        SUDO="" # Already root
-    fi
-}
-
-
-# Get disk usage information for the root filesystem
-# Outputs: used_gib total_gib
-get_disk_info() {
-  local used_k size_k used_gib total_gib
-  # Use POSIX locale for consistent decimal point, get KiB values
-  if ! { LC_NUMERIC=C df --output=used,size / | awk 'NR==2 {print $1, $2}'; } | read used_k size_k; then
-      error "Failed to get disk usage information."
-      return 1 # Indicate failure
-  fi
-
-  # Check if values are numeric
-  if ! [[ "$used_k" =~ ^[0-9]+$ ]] || ! [[ "$size_k" =~ ^[0-9]+$ ]]; then
-      error "Invalid disk usage values obtained: used='$used_k', size='$size_k'"
-      return 1
-  fi
-
-  # Calculate GiB using awk for floating point math
-  used_gib=$(awk "BEGIN {printf \"%.2f\", $used_k / 1024 / 1024}")
-  total_gib=$(awk "BEGIN {printf \"%.2f\", $size_k / 1024 / 1024}")
-
-  echo "$used_gib $total_gib"
-}
-
-# Check if /boot is mounted
-check_boot_partition() {
-  if ! $CHECK_BOOT_MOUNT; then
-      info "Skipping /boot mount check as configured."
-      return 0
-  fi
-
-  info "Checking if /boot partition is mounted..."
-  if mountpoint -q /boot; then
-    success "/boot is mounted."
-    # No need for pause here, let the script flow
-  else
-    warning "/boot is NOT mounted! This might be important for kernel updates."
-    # Decide if this is critical. Exiting might be too harsh for some setups.
-    # read -p "Press Enter to continue despite missing /boot, or Ctrl+C to abort..."
-  fi
-}
-
-# Update Flatpak packages if Flatpak is installed
-update_flatpak() {
-  if command -v flatpak &> /dev/null; then
-    local pkg_count
-    pkg_count=$(flatpak list | wc -l) # Simple count, might include header
-    info "Found $pkg_count Flatpak packages. Updating..."
-    if flatpak update -y; then
-      success "Flatpak packages updated."
-    else
-      error "Flatpak update failed."
-      # Decide whether to continue or exit
-    fi
-  else
-    info "Flatpak not found, skipping Flatpak update."
-  fi
-}
-
-# Perform system cleanup
-# Arguments:
-# 1: Package manager name (e.g., "Pacman", "APT", "DNF")
-# 2: Command to remove unused packages (e.g., "pacman -Rns \$(pacman -Qtdq)")
-# 3: Command to clean package cache (e.g., "pacman -Scc --noconfirm")
-# 4: Path to package cache directory for size check (e.g., "/var/cache/pacman/pkg/")
-perform_cleanup() {
-  local pm_name="$1"
-  local autoremove_cmd="$2"
-  local clean_cache_cmd="$3"
-  local cache_dir="$4"
-  local before_used before_total after_used after_total saved_gib cache_size_before cache_size_after user_cache_size_before user_cache_size_after
-
-  info "Starting cleanup process for $pm_name..."
-
-  # Get initial disk usage
-  if ! read before_used before_total < <(get_disk_info); then
-      error "Cannot proceed with cleanup without initial disk info."
-      return 1
-  fi
-  info "Disk usage before cleanup: ${before_used}G / ${before_total}G"
-
-  # 1. Remove unused packages
-  if [[ -n "$autoremove_cmd" ]]; then
-    info "Removing unused packages..."
-    # Need to handle cases where the command might fail if no packages match (e.g., pacman -Qtdq)
-    eval "$SUDO $autoremove_cmd" || warning "Autoremove command encountered issues (maybe no packages to remove)."
-  fi
-
-  # 2. Clean package manager cache
-  if [[ -n "$clean_cache_cmd" ]]; then
-    if [[ -n "$cache_dir" && -d "$cache_dir" ]]; then
-        cache_size_before=$($SUDO du -sh "$cache_dir" 2>/dev/null | awk '{print $1}')
-        info "Cleaning $pm_name cache (size before: ${cache_size_before:-unknown})..."
-    else
-        info "Cleaning $pm_name cache..."
-    fi
-    eval "$SUDO $clean_cache_cmd"
-    if [[ -n "$cache_dir" && -d "$cache_dir" ]]; then
-        cache_size_after=$($SUDO du -sh "$cache_dir" 2>/dev/null | awk '{print $1}')
-        info "$pm_name cache size after: ${cache_size_after:-unknown}"
-    fi
-  fi
-
-  # 3. Clean user cache (~/.cache)
-  # Ensure HOME is set correctly, especially if run via sudo
-  local user_home="${HOME:-$(getent passwd $SUDO_USER | cut -d: -f6)}"
-  local user_cache_dir="${user_home}/.cache"
-
-  if $CLEAN_USER_CACHE && [[ -n "$user_home" && -d "$user_cache_dir" ]]; then
-      user_cache_size_before=$(du -sh "$user_cache_dir" | awk '{print $1}')
-      info "Cleaning user cache: ${user_cache_dir} (size before: $user_cache_size_before)"
-      # Use find to delete contents instead of rm -rf the directory itself
-      # This avoids potential permission issues if the directory has special modes/ACLs
-      # Also safer if $user_cache_dir somehow expands incorrectly
-      find "$user_cache_dir" -mindepth 1 -delete || warning "Could not delete contents of ${user_cache_dir}"
-      # No need to recreate or chown if we only deleted the contents
-      user_cache_size_after=$(du -sh "$user_cache_dir" | awk '{print $1}') # Should be small now
-      info "User cache size after: $user_cache_size_after"
-  elif $CLEAN_USER_CACHE; then
-      info "User cache ${user_cache_dir} not found or not a directory."
-  else
-      info "Skipping user cache cleanup as configured."
-  fi
-
-
-  # Get final disk usage
-  if ! read after_used after_total < <(get_disk_info); then
-      error "Could not get disk info after cleanup."
-      return 1
-  fi
-  info "Disk usage after cleanup: ${after_used}G / ${after_total}G"
-
-  # Calculate and report saved space
-  saved_gib=$(awk "BEGIN {printf \"%.2f\", $before_used - $after_used}")
-  if (( $(awk 'BEGIN {print ("'$saved_gib'" > 0)}') )); then
-      success "Cleaned up approximately ${saved_gib}G"
-  elif (( $(awk 'BEGIN {print ("'$saved_gib'" < 0)}') )); then
-      warning "Disk usage appears to have increased by ${saved_gib#-}G. This might happen due to concurrent writes."
-  else
-      info "No significant change in disk space detected after cleanup."
-  fi
-}
-
-
-# --- Main Logic ---
-main() {
-  # Strict mode: exit on error, exit on unset variables, pipe failures count
-  # Removed -u because SUDO_USER might be unset if run directly as root
-  set -eo pipefail
-
-  check_sudo # Determine if we need to prepend sudo
-
-  local pm=""
-  local pm_name=""
-  local update_cmd=""
-  local upgrade_cmd=""
-  local autoremove_cmd=""
-  local clean_cache_cmd=""
-  local cache_dir=""
-  local pkg_count_cmd=""
-  local pkg_count=0
-  local pm_path="" # Store full path to package manager
-
-  # Detect Package Manager
-  if command -v pacman &> /dev/null; then
-    pm="pacman"
-    pm_name="Pacman (Arch)"
-    pm_path=$(command -v pacman)
-    update_cmd="$pm_path -Syu --noconfirm" # Use --noconfirm cautiously or remove
-    # upgrade_cmd="" # Syu does both
-    # Handle potential error if no orphans: Add || true
-    autoremove_cmd='sh -c '\''orphans=$('"$pm_path"' -Qtdq); if [ -n "$orphans" ]; then '"$pm_path"' -Rns --noconfirm $orphans; else echo "No orphans found."; fi'\'' || true'
-    clean_cache_cmd="$pm_path -Scc --noconfirm"
-    cache_dir="/var/cache/pacman/pkg/"
-    pkg_count_cmd="$pm_path -Q | wc -l"
-    CHECK_BOOT_MOUNT=true # Generally more important for Arch rolling release kernel updates
-
-  elif command -v apt &> /dev/null; then
-    pm="apt"
-    pm_name="APT (Debian/Ubuntu)"
-    pm_path=$(command -v apt)
-    update_cmd="$pm_path update"
-    upgrade_cmd="$pm_path upgrade -y"
-    autoremove_cmd="$pm_path autoremove --purge -y"
-    clean_cache_cmd="$pm_path clean" # apt autoclean removes only old packages
-    cache_dir="/var/cache/apt/archives/"
-    pkg_count_cmd="dpkg-query -f '.\n' -W | wc -l" # More accurate than dpkg --list
-    CHECK_BOOT_MOUNT=false # Standard apt upgrade usually doesn't touch kernel unless using dist-upgrade
-
-  elif command -v dnf &> /dev/null; then
-    pm="dnf"
-    pm_name="DNF (Fedora)"
-    pm_path=$(command -v dnf)
-    update_cmd="$pm_path check-update" # Check first is optional but good practice
-    upgrade_cmd="$pm_path upgrade -y"
-    autoremove_cmd="$pm_path autoremove -y"
-    clean_cache_cmd="$pm_path clean all"
-    cache_dir="/var/cache/dnf/"
-    # *** MODIFICATION: Use rpm -qa for package count on Fedora ***
-    pkg_count_cmd="rpm -qa | wc -l"
-    CHECK_BOOT_MOUNT=true # Kernel updates common
-
-  else
-    error "Unsupported package manager. Could not find pacman, apt, or dnf."
+if ! command -v sudo &> /dev/null; then
+    log_error "'sudo' command not found. Please install it."
     exit 1
-  fi
+fi
 
-  info "Detected package manager: ${CLR_BOLD}$pm_name${CLR_RESET} (Path: $pm_path)"
-  # Use eval carefully, ensure pkg_count_cmd is safe
-  if [[ -n "$pkg_count_cmd" ]]; then
-      eval "pkg_count=$($pkg_count_cmd)" # Run the command to get count
-      info "Found $pkg_count native packages."
-  else
-      info "Could not determine package count command."
-  fi
+# Check sudo credentials early
+log_info "Checking sudo access..."
+if sudo -v; then
+    log_success "Sudo access verified."
+else
+    log_error "Failed to obtain sudo privileges. Please run 'sudo -v' first or check your sudoers file."
+    exit 1
+fi
 
+check_boot_partition # Run boot check once
 
-  # --- Update Phase ---
-  info "Starting system update..."
-  check_boot_partition # Check /boot mount status if configured/needed
+# --- Detect Distro and Update ---
+DISTRO_TYPE="Unknown"
+UPDATE_SUCCESS=false
 
+# Get initial disk info if cleaning is enabled
+if [ "$AUTO_CLEANUP" = true ]; then
+    read -r DISK_USED_BEFORE DISK_TOTAL_BEFORE < <(get_disk_info /)
+fi
 
-  # *** Debugging block kept, but verbosity logic simplified ***
-  info "--- Debug: Checking Environment Before Update ---"
-  echo "Running as user: $(whoami)"
-  echo "Effective user ID: $EUID"
-  echo "SUDO variable: '$SUDO'"
-  echo "SUDO_USER variable: '${SUDO_USER:-<not set>}'" # Show who invoked sudo
-  echo "update_cmd: '$update_cmd'"
-  echo "PATH: $PATH"
-  echo "HOME: $HOME"
-  echo "TERM: ${TERM:-<not set>}"
-  echo "HTTP_PROXY: ${HTTP_PROXY:-<not set>}"
-  echo "HTTPS_PROXY: ${HTTPS_PROXY:-<not set>}"
-  echo "NO_PROXY: ${NO_PROXY:-<not set>}"
-  echo "LANG: ${LANG:-<not set>}"
-  echo "LC_ALL: ${LC_ALL:-<not set>}"
-  info "--- End Debug ---"
+if command -v pacman &> /dev/null; then
+    DISTRO_TYPE="Arch"
+    update_os "pacman" \
+              "pacman -Sy" \
+              "pacman -Su $PACMAN_CONFIRM_FLAG" \
+              "pacman -Q | wc -l" \
+              "packages" \
+              "$PACMAN_CONFIRM_FLAG" && UPDATE_SUCCESS=true
 
-  info "Running package list update..."
-  # Create temporary files to capture output
-  STDOUT_FILE=$(mktemp)
-  STDERR_FILE=$(mktemp)
+elif command -v apt &> /dev/null; then
+    DISTRO_TYPE="Debian/Ubuntu"
+    update_os "apt" \
+              "apt update" \
+              "apt upgrade $APT_CONFIRM_FLAG" \
+              "dpkg --list | grep -c '^ii'" \
+              "packages" \
+              "$APT_CONFIRM_FLAG" && UPDATE_SUCCESS=true
 
-  # *** MODIFICATION: Removed automatic addition of -v for dnf/apt ***
-  # Just use the base update command defined earlier
-  verbose_update_cmd="$update_cmd"
+elif command -v dnf &> /dev/null; then
+    DISTRO_TYPE="Fedora"
+    update_os "dnf" \
+              "" \
+              "dnf upgrade $DNF_CONFIRM_FLAG" \
+              "dnf list installed | wc -l" \
+              "packages" \
+              "$DNF_CONFIRM_FLAG" && UPDATE_SUCCESS=true
+    # Note: dnf upgrade often implicitly runs a metadata update (like dnf check-update)
+else
+    log_error "Unsupported distribution. No known package manager (pacman, apt, dnf) found."
+    exit 1
+fi
 
-  # Run the command, redirecting stdout and stderr
-  set +e # Temporarily disable exit on error to capture exit code
-  $SUDO $verbose_update_cmd > "$STDOUT_FILE" 2> "$STDERR_FILE"
-  CMD_EXIT_CODE=$? # Capture the exit code
-  set -e # Re-enable exit on error
+# --- Flatpak Update ---
+if [ "$UPDATE_SUCCESS" = true ]; then
+    update_flatpak
+fi
 
-  echo -e "${CLR_BOLD}--- Update Command stdout ---${CLR_RESET}"
-  cat "$STDOUT_FILE"
-  echo -e "${CLR_BOLD}--- Update Command stderr ---${CLR_RESET}"
-  cat "$STDERR_FILE"
-  echo -e "${CLR_BOLD}--- Update Command exit code: $CMD_EXIT_CODE ---${CLR_RESET}"
-  rm "$STDOUT_FILE" "$STDERR_FILE" # Clean up temp files
+# --- Cleanup ---
+if [ "$AUTO_CLEANUP" = true ] && [ "$UPDATE_SUCCESS" = true ]; then
+    log_info "=== Starting Post-Update Cleanup ==="
+    case "$DISTRO_TYPE" in
+        "Arch")
+            clean_os "pacman" \
+                     "pacman -Rns \$(pacman -Qtdq) --noconfirm" \
+                     "pacman -Scc --noconfirm" \
+                     "/var/cache/pacman/pkg/"
+            ;;
+        "Debian/Ubuntu")
+            clean_os "apt" \
+                     "apt autoremove --purge -y" \
+                     "apt clean" \
+                     "/var/cache/apt/archives"
+            ;;
+        "Fedora")
+            clean_os "dnf" \
+                     "dnf autoremove -y" \
+                     "dnf clean all" \
+                     "/var/cache/dnf"
+            ;;
+    esac
 
-  if [ $CMD_EXIT_CODE -eq 0 ]; then
-      success "$pm_name package lists updated."
-  else
-      # Check for specific DNF exit codes if needed
-      # 100 = no updates available (success for check-update)
-      # 1 = general error
-      # 0 = success (already handled)
-      if [[ "$pm" == "dnf" && "$update_cmd" == *check-update && $CMD_EXIT_CODE -eq 100 ]]; then
-          success "$pm_name package list check complete. No updates found."
-      else
-          error "$pm_name package list update failed (Exit code: $CMD_EXIT_CODE)."
-          # Optionally add more specific error handling based on CMD_EXIT_CODE here
-          # For now, any non-zero and non-100 code is treated as failure.
-          exit 1 # Critical step
-      fi
-  fi
-  # *** End of MODIFIED package list update block ***
+    # Get final disk info and display savings
+    read -r DISK_USED_AFTER DISK_TOTAL_AFTER < <(get_disk_info /)
+    display_disk_saved "$DISK_USED_BEFORE" "$DISK_TOTAL_BEFORE" "$DISK_USED_AFTER" "$DISK_TOTAL_AFTER"
 
+elif [ "$AUTO_CLEANUP" = true ] && [ "$UPDATE_SUCCESS" = false ]; then
+    log_warning "Skipping cleanup because the update process failed."
+else
+    log_info "Skipping cleanup tasks."
+fi
 
-  if [[ -n "$upgrade_cmd" ]]; then
-    info "Running system upgrade..."
-    # Add similar detailed logging here if upgrade fails
-    if $SUDO $upgrade_cmd; then
-      success "$pm_name system upgrade completed."
-    else
-      error "$pm_name system upgrade failed."
-      # Decide whether to exit or continue with flatpak/cleanup
-      # exit 1
-    fi
-  fi
+echo "-----------------------------"
+if [ "$UPDATE_SUCCESS" = true ]; then
+    log_success "${BOLD}System update process finished.${NC}"
+else
+     log_error "${BOLD}System update process finished with errors.${NC}"
+fi
+echo -e "${BOLD}${CYAN}============================${NC}"
 
-  update_flatpak # Update flatpaks if present
-
-  # --- Cleanup Phase ---
-  # Use prompt with current user context in mind
-  prompt_user="${SUDO_USER:-$(whoami)}"
-  read -p "$(echo -e ${CLR_BOLD}"${prompt_user}, perform cleanup (remove unused packages and caches)? [y/N]: "${CLR_RESET})" -n 1 -r REPLY
-  echo # Move to a new line
-
-  if [[ "$REPLY" =~ ^[Yy]$ ]]; then
-    perform_cleanup "$pm_name" "$autoremove_cmd" "$clean_cache_cmd" "$cache_dir"
-  else
-    info "Skipping cleanup phase."
-  fi
-
-  success "Script finished."
-  # Optional: remove the final 'press enter to exit'
-  # read -p "Press Enter to exit..."
-}
-
-# --- Run Script ---
-main "$@" # Pass command line arguments if needed in the future
+exit 0 # Exit with success if we reached here without fatal errors
