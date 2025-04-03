@@ -3,10 +3,10 @@
 # === Configuration ===
 # Set to true to automatically run cleanup tasks, false to skip.
 # Can be overridden with --clean or --no-clean arguments.
-AUTO_CLEANUP=false
+AUTO_CLEANUP=true
 # Set to true to automatically confirm package manager upgrades (USE WITH CAUTION).
 # Can be overridden with --yes or -y argument.
-AUTO_CONFIRM_UPGRADES=false
+AUTO_CONFIRM_UPGRADES=true
 
 # === Colors ===
 RED='\033[0;31m'
