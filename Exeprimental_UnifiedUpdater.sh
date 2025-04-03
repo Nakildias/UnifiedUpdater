@@ -103,6 +103,7 @@ check_boot_partition() {
     fi
 }
 
+# *** MODIFIED update_os function ***
 update_os() {
     local pm=$1
     local update_cmd=$2
@@ -112,10 +113,21 @@ update_os() {
     local confirm_flag=$6
 
     local package_count=$(eval "$package_count_cmd")
+    # Check if package count command succeeded and got a number
+    if ! [[ "$package_count" =~ ^[0-9]+$ ]]; then
+       log_warning "Could not determine package count accurately. Command used: '$package_count_cmd'"
+       package_count="N/A" # Set to N/A if count failed
+    fi
     log_info "Detected $pm ($package_count $packages_desc)"
 
-    log_info "Updating package lists..."
-    run_command "sudo $update_cmd" || return 1 # Stop if update fails
+    # *** ADDED CHECK: Only run update_cmd if it's not empty ***
+    if [ -n "$update_cmd" ]; then
+        log_info "Updating package lists..."
+        run_command "sudo $update_cmd" || return 1 # Stop if explicit update fails
+    else
+        # Optional: Log that the step is skipped/integrated
+        log_info "Package list update is integrated with upgrade command for $pm."
+    fi
 
     log_info "Upgrading packages..."
     run_command "sudo $upgrade_cmd $confirm_flag" || return 1 # Stop if upgrade fails
@@ -123,6 +135,7 @@ update_os() {
     log_success "$pm package upgrade complete."
     return 0
 }
+
 
 clean_os() {
     local pm=$1
@@ -164,12 +177,12 @@ clean_os() {
 update_flatpak() {
     if command -v flatpak &> /dev/null; then
         log_info "Checking for Flatpak updates..."
-        local flatpak_count=$(flatpak list | wc -l)
+        local flatpak_count=$(flatpak list --app | wc -l) # Count only apps
         if [ "$flatpak_count" -gt 0 ]; then
-             log_info "Found $flatpak_count Flatpak packages."
+             log_info "Found $flatpak_count Flatpak applications."
              run_command "flatpak update $FLATPAK_CONFIRM_FLAG" # Add -y if needed
         else
-             log_info "No Flatpaks installed."
+             log_info "No Flatpaks applications installed or detected."
         fi
     else
         log_info "Flatpak not installed."
@@ -262,17 +275,18 @@ elif command -v apt &> /dev/null; then
     update_os "apt" \
               "apt update" \
               "apt upgrade $APT_CONFIRM_FLAG" \
-              "dpkg --list | grep -c '^ii'" \
+              "dpkg-query -f '.\n' -W | wc -l" \ # More robust count for deb
               "packages" \
               "$APT_CONFIRM_FLAG" && UPDATE_SUCCESS=true
 
+# *** MODIFIED dnf section ***
 elif command -v dnf &> /dev/null; then
     DISTRO_TYPE="Fedora"
     update_os "dnf" \
               "" \
               "dnf upgrade $DNF_CONFIRM_FLAG" \
-              "dnf list installed | wc -l" \
-              "packages" \
+              "rpm -qa | wc -l" \ # Use rpm for more reliable package count
+              "packages (rpm)" \
               "$DNF_CONFIRM_FLAG" && UPDATE_SUCCESS=true
     # Note: dnf upgrade often implicitly runs a metadata update (like dnf check-update)
 else
@@ -327,4 +341,9 @@ else
 fi
 echo -e "${BOLD}${CYAN}============================${NC}"
 
-exit 0 # Exit with success if we reached here without fatal errors
+# Set exit status based on success
+if [ "$UPDATE_SUCCESS" = true ]; then
+    exit 0
+else
+    exit 1 # Exit with error status if update failed
+fi
