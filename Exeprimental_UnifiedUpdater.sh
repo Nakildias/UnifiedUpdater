@@ -174,14 +174,11 @@ perform_cleanup() {
   if $CLEAN_USER_CACHE && [[ -n "$user_home" && -d "$user_cache_dir" ]]; then
       user_cache_size_before=$(du -sh "$user_cache_dir" | awk '{print $1}')
       info "Cleaning user cache: ${user_cache_dir} (size before: $user_cache_size_before)"
-      rm -rf "$user_cache_dir"
-      # Recreate the directory, as some apps expect it
-      # Ensure correct ownership if running as root but cleaning user cache
-      if [[ $EUID -eq 0 && -n "$SUDO_USER" ]]; then
-          mkdir "$user_cache_dir" &>/dev/null && chown "$SUDO_USER:$SUDO_USER" "$user_cache_dir" || warning "Could not recreate or chown ${user_cache_dir}"
-      else
-          mkdir "$user_cache_dir" &>/dev/null || warning "Could not recreate ${user_cache_dir}"
-      fi
+      # Use find to delete contents instead of rm -rf the directory itself
+      # This avoids potential permission issues if the directory has special modes/ACLs
+      # Also safer if $user_cache_dir somehow expands incorrectly
+      find "$user_cache_dir" -mindepth 1 -delete || warning "Could not delete contents of ${user_cache_dir}"
+      # No need to recreate or chown if we only deleted the contents
       user_cache_size_after=$(du -sh "$user_cache_dir" | awk '{print $1}') # Should be small now
       info "User cache size after: $user_cache_size_after"
   elif $CLEAN_USER_CACHE; then
@@ -335,13 +332,13 @@ main() {
       # 1 = general error
       # 0 = success (already handled)
       if [[ "$pm" == "dnf" && "$update_cmd" == *check-update && $CMD_EXIT_CODE -eq 100 ]]; then
-           success "$pm_name package list check complete. No updates found."
+          success "$pm_name package list check complete. No updates found."
       else
-           error "$pm_name package list update failed (Exit code: $CMD_EXIT_CODE)."
-           # Optionally add more specific error handling based on CMD_EXIT_CODE here
-           # For now, any non-zero and non-100 code is treated as failure.
-           exit 1 # Critical step
-       fi
+          error "$pm_name package list update failed (Exit code: $CMD_EXIT_CODE)."
+          # Optionally add more specific error handling based on CMD_EXIT_CODE here
+          # For now, any non-zero and non-100 code is treated as failure.
+          exit 1 # Critical step
+      fi
   fi
   # *** End of MODIFIED package list update block ***
 
