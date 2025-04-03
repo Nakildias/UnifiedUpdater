@@ -1,5 +1,5 @@
 # Tested on and works on
-> Fedora, Arch Linux, Debian
+> Fedora, Arch Linux, Debian (Also updates flatpaks)
 ## How to use?
 ### Clone using git
 > git clone https://github.com/Nakildias/UnifiedUpdater
