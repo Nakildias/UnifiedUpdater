@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash
 
 # === Configuration ===
 # Set to true to automatically run cleanup tasks, false to skip.
@@ -37,18 +37,19 @@ log_error() {
 }
 
 log_cmd() {
+    # Log the command, masking potential sensitive info if needed in future
     echo -e "${PURPLE}[CMD]${NC} $1"
 }
 
 # Function to run commands and check exit status
 run_command() {
-    log_cmd "$1"
-    eval "$1" # Using eval to handle complex commands with pipes/redirects if needed, use cautiously
+    local cmd_string="$1"
+    log_cmd "$cmd_string"
+    # Use eval carefully, primarily for commands involving pipes or complex structures passed as a single string
+    eval "$cmd_string"
     local status=$?
     if [ $status -ne 0 ]; then
-        log_error "Command failed with status $status: $1"
-        # Decide if you want to exit on failure
-        # exit $status
+        log_error "Command failed with status $status: $cmd_string"
     fi
     return $status
 }
@@ -56,13 +57,30 @@ run_command() {
 # Get disk usage info (Used GiB, Total GiB) for a given mount point (default /)
 get_disk_info() {
     local mount_point="${1:-/}"
-    # df outputs Used and Size in KiB blocks by default with --output
-    local disk_info=$(df --output=used,size "$mount_point" | awk 'NR==2')
-    local disk_used_kib=$(echo "$disk_info" | awk '{print $1}')
-    local disk_total_kib=$(echo "$disk_info" | awk '{print $2}')
+    local disk_info
+    disk_info=$(df --output=used,size "$mount_point" 2>/dev/null | awk 'NR==2')
+    if [ -z "$disk_info" ]; then
+        log_warning "Could not get disk info for $mount_point"
+        echo "0.00 0.00"
+        return 1
+    fi
 
-    local disk_used_gib=$(awk "BEGIN {printf \"%.2f\", $disk_used_kib / 1024 / 1024}")
-    local disk_total_gib=$(awk "BEGIN {printf \"%.2f\", $disk_total_kib / 1024 / 1024}")
+    local disk_used_kib
+    local disk_total_kib
+    disk_used_kib=$(echo "$disk_info" | awk '{print $1}')
+    disk_total_kib=$(echo "$disk_info" | awk '{print $2}')
+
+    # Check if values are numeric before calculation
+    if ! [[ "$disk_used_kib" =~ ^[0-9]+$ ]] || ! [[ "$disk_total_kib" =~ ^[0-9]+$ ]]; then
+         log_warning "Invalid disk size numbers obtained: used='$disk_used_kib', total='$disk_total_kib'"
+         echo "0.00 0.00"
+         return 1
+    fi
+
+    local disk_used_gib
+    local disk_total_gib
+    disk_used_gib=$(awk "BEGIN {printf \"%.2f\", $disk_used_kib / 1024 / 1024}")
+    disk_total_gib=$(awk "BEGIN {printf \"%.2f\", $disk_total_kib / 1024 / 1024}")
 
     echo "$disk_used_gib $disk_total_gib"
 }
@@ -76,11 +94,19 @@ display_disk_saved() {
 
     log_info "Disk Usage Before: ${usage_before_gib} GiB / ${total_before_gib} GiB"
     log_info "Disk Usage After:  ${usage_after_gib} GiB / ${total_after_gib} GiB"
-    local saved_gib=$(bc -l <<< "scale=2; $usage_before_gib - $usage_after_gib")
+    # Check if inputs are valid numbers before calculation
+     if ! [[ "$usage_before_gib" =~ ^[0-9]+(\.[0-9]+)?$ ]] || \
+        ! [[ "$usage_after_gib" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        log_warning "Cannot calculate disk savings due to invalid input."
+        return 1
+     fi
 
-    if (( $(echo "$saved_gib > 0" | bc -l) )); then
+    local saved_gib
+    saved_gib=$(bc -l <<< "scale=2; $usage_before_gib - $usage_after_gib")
+
+    if (( $(echo "$saved_gib > 0.00" | bc -l) )); then
         log_success "Freed up ${saved_gib} GiB of disk space."
-    elif (( $(echo "$saved_gib == 0" | bc -l) )); then
+    elif (( $(echo "$saved_gib == 0.00" | bc -l) )); then
         log_info "No significant disk space freed up by cleaning."
     else
         # This shouldn't normally happen unless something wrote data during cleanup
@@ -103,16 +129,16 @@ check_boot_partition() {
     fi
 }
 
-# *** MODIFIED update_os function ***
 update_os() {
     local pm=$1
     local update_cmd=$2
     local upgrade_cmd=$3
     local package_count_cmd=$4
     local packages_desc=$5
-    local confirm_flag=$6
+    # The confirm_flag ($6) is handled directly in the call now
 
-    local package_count=$(eval "$package_count_cmd")
+    local package_count
+    package_count=$(eval "$package_count_cmd" 2>/dev/null) # Suppress stderr from count cmd
     # Check if package count command succeeded and got a number
     if ! [[ "$package_count" =~ ^[0-9]+$ ]]; then
        log_warning "Could not determine package count accurately. Command used: '$package_count_cmd'"
@@ -120,7 +146,7 @@ update_os() {
     fi
     log_info "Detected $pm ($package_count $packages_desc)"
 
-    # *** ADDED CHECK: Only run update_cmd if it's not empty ***
+    # Only run update_cmd if it's not empty
     if [ -n "$update_cmd" ]; then
         log_info "Updating package lists..."
         run_command "sudo $update_cmd" || return 1 # Stop if explicit update fails
@@ -130,10 +156,10 @@ update_os() {
     fi
 
     log_info "Upgrading packages..."
-    run_command "sudo $upgrade_cmd $confirm_flag" || return 1 # Stop if upgrade fails
+    run_command "sudo $upgrade_cmd" || return 1 # Run the already assembled upgrade command
 
     log_success "$pm package upgrade complete."
-    return 0
+    return 0 # Explicitly return 0 on success
 }
 
 
@@ -148,24 +174,29 @@ clean_os() {
 
     if [ -n "$autoremove_cmd" ]; then
         log_info "Removing unused packages..."
-        run_command "sudo $autoremove_cmd"
+        run_command "sudo $autoremove_cmd" # Assume flags like --noconfirm/-y are part of the command string
     fi
 
     if [ -n "$clean_cache_cmd" ]; then
         log_info "Cleaning package manager cache ($cache_path)..."
-        local cache_size_before=$(eval "$cache_size_cmd")
+        local cache_size_before
+        cache_size_before=$(eval "$cache_size_cmd")
         log_info "Cache size before: $cache_size_before"
-        run_command "sudo $clean_cache_cmd"
-        local cache_size_after=$(eval "$cache_size_cmd")
+        run_command "sudo $clean_cache_cmd" # Assume flags are part of the command string
+        local cache_size_after
+        cache_size_after=$(eval "$cache_size_cmd")
         log_info "Cache size after: $cache_size_after"
     fi
 
     log_info "Cleaning user cache (~/.cache)..."
     if [ -d "$HOME/.cache" ]; then
-        local user_cache_size_before=$(du -sh "$HOME/.cache" 2>/dev/null)
+        local user_cache_size_before
+        user_cache_size_before=$(du -sh "$HOME/.cache" 2>/dev/null)
         log_info "User cache size before: $user_cache_size_before"
-        run_command "rm -rf $HOME/.cache/*" # Clear contents instead of removing the dir itself
-        local user_cache_size_after=$(du -sh "$HOME/.cache" 2>/dev/null)
+        # Use find to delete contents - safer than rm -rf * with weird filenames
+        run_command "find '$HOME/.cache' -mindepth 1 -delete"
+        local user_cache_size_after
+        user_cache_size_after=$(du -sh "$HOME/.cache" 2>/dev/null)
         log_info "User cache size after: $user_cache_size_after"
     else
        log_info "User cache directory (~/.cache) not found."
@@ -177,10 +208,11 @@ clean_os() {
 update_flatpak() {
     if command -v flatpak &> /dev/null; then
         log_info "Checking for Flatpak updates..."
-        local flatpak_count=$(flatpak list --app | wc -l) # Count only apps
+        local flatpak_count
+        flatpak_count=$(flatpak list --app | wc -l) # Count only apps
         if [ "$flatpak_count" -gt 0 ]; then
              log_info "Found $flatpak_count Flatpak applications."
-             run_command "flatpak update $FLATPAK_CONFIRM_FLAG" # Add -y if needed
+             run_command "flatpak update $FLATPAK_CONFIRM_FLAG" # Use flag set earlier
         else
              log_info "No Flatpaks applications installed or detected."
         fi
@@ -192,9 +224,9 @@ update_flatpak() {
 # === Argument Parsing ===
 while [[ "$#" -gt 0 ]]; do
     case $1 in
-        -c|--clean) AUTO_CLEANUP=true; ;;
-        --no-clean) AUTO_CLEANUP=false; ;;
-        -y|--yes) AUTO_CONFIRM_UPGRADES=true; ;;
+        -c|--clean) AUTO_CLEANUP=true; shift ;;
+        --no-clean) AUTO_CLEANUP=false; shift ;;
+        -y|--yes) AUTO_CONFIRM_UPGRADES=true; shift ;;
         -h|--help)
             echo "Usage: $0 [--clean | --no-clean] [-y | --yes] [-h | --help]"
             echo "  --clean      Perform cleanup tasks after updates (overrides config)."
@@ -205,10 +237,11 @@ while [[ "$#" -gt 0 ]]; do
             ;;
         *) log_warning "Unknown parameter passed: $1"; exit 1 ;;
     esac
-    shift
+    # Removed shift from here, handled in each case
 done
 
 # Determine confirmation flags based on AUTO_CONFIRM_UPGRADES
+# These flags are now appended directly to the command strings where needed
 PACMAN_CONFIRM_FLAG=""
 APT_CONFIRM_FLAG=""
 DNF_CONFIRM_FLAG=""
@@ -220,6 +253,7 @@ if [ "$AUTO_CONFIRM_UPGRADES" = true ]; then
     APT_CONFIRM_FLAG="-y"
     DNF_CONFIRM_FLAG="-y"
     FLATPAK_CONFIRM_FLAG="-y"
+    # Cleanup flags are hardcoded below as they are less risky
 fi
 
 # === Main Execution ===
@@ -241,7 +275,7 @@ if ! command -v sudo &> /dev/null; then
     exit 1
 fi
 
-# Check sudo credentials early
+# Check sudo credentials early and refresh timestamp
 log_info "Checking sudo access..."
 if sudo -v; then
     log_success "Sudo access verified."
@@ -254,68 +288,85 @@ check_boot_partition # Run boot check once
 
 # --- Detect Distro and Update ---
 DISTRO_TYPE="Unknown"
-UPDATE_SUCCESS=false
+UPDATE_SUCCESS=false # Default to failure
 
 # Get initial disk info if cleaning is enabled
+DISK_USED_BEFORE="0.00"
+DISK_TOTAL_BEFORE="0.00"
 if [ "$AUTO_CLEANUP" = true ]; then
     read -r DISK_USED_BEFORE DISK_TOTAL_BEFORE < <(get_disk_info /)
 fi
 
+# Assemble command strings including confirmation flags
+PACMAN_UPGRADE_CMD="pacman -Su $PACMAN_CONFIRM_FLAG"
+APT_UPGRADE_CMD="apt upgrade $APT_CONFIRM_FLAG"
+DNF_UPGRADE_CMD="dnf upgrade $DNF_CONFIRM_FLAG" # Removed the stray 'Use'
+
+# *** Use if/then structure instead of && for setting UPDATE_SUCCESS ***
 if command -v pacman &> /dev/null; then
     DISTRO_TYPE="Arch"
-    update_os "pacman" \
-              "pacman -Sy" \
-              "pacman -Su $PACMAN_CONFIRM_FLAG" \
-              "pacman -Q | wc -l" \
-              "packages" \
-              "$PACMAN_CONFIRM_FLAG" && UPDATE_SUCCESS=true
+    if update_os "pacman" \
+                 "pacman -Sy" \
+                 "$PACMAN_UPGRADE_CMD" \
+                 "pacman -Q | wc -l" \
+                 "packages" ; then
+        UPDATE_SUCCESS=true
+    fi
 
 elif command -v apt &> /dev/null; then
     DISTRO_TYPE="Debian/Ubuntu"
-    update_os "apt" \
-              "apt update" \
-              "apt upgrade $APT_CONFIRM_FLAG" \
-              "dpkg-query -f '.\n' -W | wc -l" \ # More robust count for deb
-              "packages" \
-              "$APT_CONFIRM_FLAG" && UPDATE_SUCCESS=true
+    if update_os "apt" \
+                 "apt update" \
+                 "$APT_UPGRADE_CMD" \
+                 "dpkg-query -f '.\n' -W | wc -l" \
+                 "packages" ; then
+        UPDATE_SUCCESS=true
+    fi
 
-# *** MODIFIED dnf section ***
 elif command -v dnf &> /dev/null; then
     DISTRO_TYPE="Fedora"
-    update_os "dnf" \
-              "" \
-              "dnf upgrade $DNF_CONFIRM_FLAG" \
-              "rpm -qa | wc -l" \ # Use rpm for more reliable package count
-              "packages (rpm)" \
-              "$DNF_CONFIRM_FLAG" && UPDATE_SUCCESS=true
-    # Note: dnf upgrade often implicitly runs a metadata update (like dnf check-update)
+    # *** CORRECTED 3rd argument below - removed stray word 'Use' ***
+    if update_os "dnf" \
+                 "" \
+                 "$DNF_UPGRADE_CMD" \
+                 "rpm -qa | wc -l" \
+                 "packages (rpm)" ; then
+        UPDATE_SUCCESS=true
+    fi
 else
     log_error "Unsupported distribution. No known package manager (pacman, apt, dnf) found."
     exit 1
 fi
 
 # --- Flatpak Update ---
-if [ "$UPDATE_SUCCESS" = true ]; then
+# Only run if OS update was successful OR if no OS package manager was found but flatpak exists
+if [ "$UPDATE_SUCCESS" = true ] || { [ "$DISTRO_TYPE" = "Unknown" ] && command -v flatpak &> /dev/null; }; then
+    # Consider if Flatpak update failure should affect overall success? For now, it doesn't.
     update_flatpak
 fi
 
 # --- Cleanup ---
 if [ "$AUTO_CLEANUP" = true ] && [ "$UPDATE_SUCCESS" = true ]; then
     log_info "=== Starting Post-Update Cleanup ==="
+    DISK_USED_AFTER="0.00"
+    DISK_TOTAL_AFTER="0.00"
     case "$DISTRO_TYPE" in
         "Arch")
+            # Added --noconfirm flags directly here
             clean_os "pacman" \
                      "pacman -Rns \$(pacman -Qtdq) --noconfirm" \
                      "pacman -Scc --noconfirm" \
                      "/var/cache/pacman/pkg/"
             ;;
         "Debian/Ubuntu")
+            # Added -y flags directly here
             clean_os "apt" \
                      "apt autoremove --purge -y" \
                      "apt clean" \
                      "/var/cache/apt/archives"
             ;;
         "Fedora")
+             # Added -y flags directly here
             clean_os "dnf" \
                      "dnf autoremove -y" \
                      "dnf clean all" \
