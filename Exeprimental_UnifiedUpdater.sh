@@ -12,7 +12,8 @@ CHECK_BOOT_MOUNT=true
 CLEAN_USER_CACHE=true
 
 # --- Colors and Formatting (Optional) ---
-if $USE_COLORS && [[ -t 1 ]]; then # Check if connected to a terminal
+# Check if connected to a terminal and USE_COLORS is true
+if $USE_COLORS && [[ -t 1 ]]; then
   CLR_RESET='\033[0m'
   CLR_INFO='\033[1;34m'    # Blue Bold
   CLR_SUCCESS='\033[1;32m' # Green Bold
@@ -47,6 +48,9 @@ error() {
 
 # Check if running as root, prompt if not using sudo prefix
 check_sudo() {
+    # Use global scope for SUDO or pass it back if preferred
+    declare -g SUDO # Ensure SUDO is globally accessible from this function
+
     if [[ $EUID -ne 0 ]]; then
         if ! command -v sudo &>/dev/null; then
             error "sudo command not found, and script not run as root. Please install sudo or run as root."
@@ -58,6 +62,7 @@ check_sudo() {
         SUDO="" # Already root
     fi
 }
+
 
 # Get disk usage information for the root filesystem
 # Outputs: used_gib total_gib
@@ -134,8 +139,8 @@ perform_cleanup() {
 
   # Get initial disk usage
   if ! read before_used before_total < <(get_disk_info); then
-       error "Cannot proceed with cleanup without initial disk info."
-       return 1
+      error "Cannot proceed with cleanup without initial disk info."
+      return 1
   fi
   info "Disk usage before cleanup: ${before_used}G / ${before_total}G"
 
@@ -149,32 +154,42 @@ perform_cleanup() {
   # 2. Clean package manager cache
   if [[ -n "$clean_cache_cmd" ]]; then
     if [[ -n "$cache_dir" && -d "$cache_dir" ]]; then
-        cache_size_before=$($SUDO du -sh "$cache_dir" | awk '{print $1}')
-        info "Cleaning $pm_name cache (size before: $cache_size_before)..."
+        cache_size_before=$($SUDO du -sh "$cache_dir" 2>/dev/null | awk '{print $1}')
+        info "Cleaning $pm_name cache (size before: ${cache_size_before:-unknown})..."
     else
         info "Cleaning $pm_name cache..."
     fi
     eval "$SUDO $clean_cache_cmd"
     if [[ -n "$cache_dir" && -d "$cache_dir" ]]; then
-        cache_size_after=$($SUDO du -sh "$cache_dir" | awk '{print $1}')
-        info "$pm_name cache size after: $cache_size_after"
+        cache_size_after=$($SUDO du -sh "$cache_dir" 2>/dev/null | awk '{print $1}')
+        info "$pm_name cache size after: ${cache_size_after:-unknown}"
     fi
   fi
 
   # 3. Clean user cache (~/.cache)
-  if $CLEAN_USER_CACHE && [[ -d "$HOME/.cache" ]]; then
-      user_cache_size_before=$(du -sh "$HOME/.cache" | awk '{print $1}')
-      info "Cleaning user cache: ~/.cache (size before: $user_cache_size_before)"
-      rm -rf "$HOME/.cache"
+  # Ensure HOME is set correctly, especially if run via sudo
+  local user_home="${HOME:-$(getent passwd $SUDO_USER | cut -d: -f6)}"
+  local user_cache_dir="${user_home}/.cache"
+
+  if $CLEAN_USER_CACHE && [[ -n "$user_home" && -d "$user_cache_dir" ]]; then
+      user_cache_size_before=$(du -sh "$user_cache_dir" | awk '{print $1}')
+      info "Cleaning user cache: ${user_cache_dir} (size before: $user_cache_size_before)"
+      rm -rf "$user_cache_dir"
       # Recreate the directory, as some apps expect it
-      mkdir "$HOME/.cache" &>/dev/null || warning "Could not recreate ~/.cache"
-      user_cache_size_after=$(du -sh "$HOME/.cache" | awk '{print $1}') # Should be small now
+      # Ensure correct ownership if running as root but cleaning user cache
+      if [[ $EUID -eq 0 && -n "$SUDO_USER" ]]; then
+          mkdir "$user_cache_dir" &>/dev/null && chown "$SUDO_USER:$SUDO_USER" "$user_cache_dir" || warning "Could not recreate or chown ${user_cache_dir}"
+      else
+          mkdir "$user_cache_dir" &>/dev/null || warning "Could not recreate ${user_cache_dir}"
+      fi
+      user_cache_size_after=$(du -sh "$user_cache_dir" | awk '{print $1}') # Should be small now
       info "User cache size after: $user_cache_size_after"
   elif $CLEAN_USER_CACHE; then
-      info "User cache ~/.cache not found or not a directory."
+      info "User cache ${user_cache_dir} not found or not a directory."
   else
       info "Skipping user cache cleanup as configured."
   fi
+
 
   # Get final disk usage
   if ! read after_used after_total < <(get_disk_info); then
@@ -194,10 +209,12 @@ perform_cleanup() {
   fi
 }
 
+
 # --- Main Logic ---
 main() {
   # Strict mode: exit on error, exit on unset variables, pipe failures count
-  set -eo pipefail -u # add -u only if you are sure all variables are defined
+  # Removed -u because SUDO_USER might be unset if run directly as root
+  set -eo pipefail
 
   check_sudo # Determine if we need to prepend sudo
 
@@ -210,27 +227,30 @@ main() {
   local cache_dir=""
   local pkg_count_cmd=""
   local pkg_count=0
+  local pm_path="" # Store full path to package manager
 
   # Detect Package Manager
   if command -v pacman &> /dev/null; then
     pm="pacman"
     pm_name="Pacman (Arch)"
-    update_cmd="pacman -Syu --noconfirm" # Use --noconfirm cautiously or remove
+    pm_path=$(command -v pacman)
+    update_cmd="$pm_path -Syu --noconfirm" # Use --noconfirm cautiously or remove
     # upgrade_cmd="" # Syu does both
     # Handle potential error if no orphans: Add || true
-    autoremove_cmd='sh -c '\''orphans=$(pacman -Qtdq); if [ -n "$orphans" ]; then pacman -Rns --noconfirm $orphans; else echo "No orphans found."; fi'\'' || true'
-    clean_cache_cmd="pacman -Scc --noconfirm"
+    autoremove_cmd='sh -c '\''orphans=$('"$pm_path"' -Qtdq); if [ -n "$orphans" ]; then '"$pm_path"' -Rns --noconfirm $orphans; else echo "No orphans found."; fi'\'' || true'
+    clean_cache_cmd="$pm_path -Scc --noconfirm"
     cache_dir="/var/cache/pacman/pkg/"
-    pkg_count_cmd="pacman -Q | wc -l"
+    pkg_count_cmd="$pm_path -Q | wc -l"
     CHECK_BOOT_MOUNT=true # Generally more important for Arch rolling release kernel updates
 
   elif command -v apt &> /dev/null; then
     pm="apt"
     pm_name="APT (Debian/Ubuntu)"
-    update_cmd="apt update"
-    upgrade_cmd="apt upgrade -y"
-    autoremove_cmd="apt autoremove --purge -y"
-    clean_cache_cmd="apt clean" # apt autoclean removes only old packages
+    pm_path=$(command -v apt)
+    update_cmd="$pm_path update"
+    upgrade_cmd="$pm_path upgrade -y"
+    autoremove_cmd="$pm_path autoremove --purge -y"
+    clean_cache_cmd="$pm_path clean" # apt autoclean removes only old packages
     cache_dir="/var/cache/apt/archives/"
     pkg_count_cmd="dpkg-query -f '.\n' -W | wc -l" # More accurate than dpkg --list
     CHECK_BOOT_MOUNT=false # Standard apt upgrade usually doesn't touch kernel unless using dist-upgrade
@@ -238,12 +258,14 @@ main() {
   elif command -v dnf &> /dev/null; then
     pm="dnf"
     pm_name="DNF (Fedora)"
-    update_cmd="dnf check-update" # Check first is optional but good practice
-    upgrade_cmd="dnf upgrade -y"
-    autoremove_cmd="dnf autoremove -y"
-    clean_cache_cmd="dnf clean all"
+    pm_path=$(command -v dnf)
+    # *** MODIFICATION: Use full path for dnf command ***
+    update_cmd="$pm_path check-update" # Check first is optional but good practice
+    upgrade_cmd="$pm_path upgrade -y"
+    autoremove_cmd="$pm_path autoremove -y"
+    clean_cache_cmd="$pm_path clean all"
     cache_dir="/var/cache/dnf/"
-    pkg_count_cmd="dnf list installed | wc -l"
+    pkg_count_cmd="$pm_path list installed | wc -l"
     CHECK_BOOT_MOUNT=true # Kernel updates common
 
   else
@@ -251,7 +273,7 @@ main() {
     exit 1
   fi
 
-  info "Detected package manager: ${CLR_BOLD}$pm_name${CLR_RESET}"
+  info "Detected package manager: ${CLR_BOLD}$pm_name${CLR_RESET} (Path: $pm_path)"
   eval "pkg_count=$($pkg_count_cmd)" # Run the command to get count
   info "Found $pkg_count native packages."
 
@@ -259,16 +281,74 @@ main() {
   info "Starting system update..."
   check_boot_partition # Check /boot mount status if configured/needed
 
-  info "Running package list update..."
-  if $SUDO $update_cmd; then
+
+  # *** MODIFICATION: Enhanced debugging for package list update ***
+  info "--- Debug: Checking Environment Before Update ---"
+  echo "Running as user: $(whoami)"
+  echo "Effective user ID: $EUID"
+  echo "SUDO variable: '$SUDO'"
+  echo "SUDO_USER variable: '${SUDO_USER:-<not set>}'" # Show who invoked sudo
+  echo "update_cmd: '$update_cmd'"
+  echo "PATH: $PATH"
+  echo "HOME: $HOME"
+  echo "TERM: ${TERM:-<not set>}"
+  echo "HTTP_PROXY: ${HTTP_PROXY:-<not set>}"
+  echo "HTTPS_PROXY: ${HTTPS_PROXY:-<not set>}"
+  echo "NO_PROXY: ${NO_PROXY:-<not set>}"
+  echo "LANG: ${LANG:-<not set>}"
+  echo "LC_ALL: ${LC_ALL:-<not set>}"
+  info "--- End Debug ---"
+
+  info "Running package list update (with verbosity)..."
+  # Create temporary files to capture output
+  STDOUT_FILE=$(mktemp)
+  STDERR_FILE=$(mktemp)
+  # Determine the command to run, adding verbosity if possible
+  verbose_update_cmd="$update_cmd"
+  if [[ "$pm" == "dnf" || "$pm" == "apt" ]]; then
+      verbose_update_cmd="$pm_path -v ${update_cmd#$pm_path }" # Add -v for dnf/apt
+  elif [[ "$pm" == "pacman" ]]; then
+      # Pacman doesn't have a simple verbosity flag for Syu check part like -v
+      # We rely on its standard output/error
+      verbose_update_cmd="$update_cmd"
+  fi
+
+  # Run the command, redirecting stdout and stderr
+  # Use 'script' command if available to better simulate TTY for sudo, if needed
+  # This is an advanced step, try without it first.
+  # Example: $SUDO script -q -c "$verbose_update_cmd" /dev/null > "$STDOUT_FILE" 2> "$STDERR_FILE"
+  set +e # Temporarily disable exit on error to capture exit code
+  $SUDO $verbose_update_cmd > "$STDOUT_FILE" 2> "$STDERR_FILE"
+  CMD_EXIT_CODE=$? # Capture the exit code
+  set -e # Re-enable exit on error
+
+  echo -e "${CLR_BOLD}--- Update Command stdout ---${CLR_RESET}"
+  cat "$STDOUT_FILE"
+  echo -e "${CLR_BOLD}--- Update Command stderr ---${CLR_RESET}"
+  cat "$STDERR_FILE"
+  echo -e "${CLR_BOLD}--- Update Command exit code: $CMD_EXIT_CODE ---${CLR_RESET}"
+  rm "$STDOUT_FILE" "$STDERR_FILE" # Clean up temp files
+
+  if [ $CMD_EXIT_CODE -eq 0 ]; then
       success "$pm_name package lists updated."
   else
-      error "$pm_name package list update failed."
-      exit 1 # Critical step
+      # Check for specific DNF exit codes if needed
+      # 100 = no updates available (success for check-update)
+      # 1 = general error
+      # 0 = success
+      if [[ "$pm" == "dnf" && "$update_cmd" == *check-update && $CMD_EXIT_CODE -eq 100 ]]; then
+           success "$pm_name package list check complete. No updates found."
+      else
+           error "$pm_name package list update failed (Exit code: $CMD_EXIT_CODE)."
+           exit 1 # Critical step
+       fi
   fi
+  # *** End of MODIFIED package list update block ***
+
 
   if [[ -n "$upgrade_cmd" ]]; then
     info "Running system upgrade..."
+    # Add similar detailed logging here if upgrade fails
     if $SUDO $upgrade_cmd; then
       success "$pm_name system upgrade completed."
     else
@@ -281,7 +361,9 @@ main() {
   update_flatpak # Update flatpaks if present
 
   # --- Cleanup Phase ---
-  read -p "$(echo -e ${CLR_BOLD}"Perform cleanup (remove unused packages and caches)? [y/N]: "${CLR_RESET})" -n 1 -r REPLY
+  # Use prompt with current user context in mind
+  prompt_user="${SUDO_USER:-$(whoami)}"
+  read -p "$(echo -e ${CLR_BOLD}"${prompt_user}, perform cleanup (remove unused packages and caches)? [y/N]: "${CLR_RESET})" -n 1 -r REPLY
   echo # Move to a new line
 
   if [[ "$REPLY" =~ ^[Yy]$ ]]; then
