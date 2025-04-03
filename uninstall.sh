@@ -20,7 +20,6 @@ NC='\033[0m' # No Color
 
 # === Helper Functions ===
 log_info() {
-    # Using standard spaces for indentation in corrected function
     echo -e "${BLUE}[INFO]${NC} $1"
 }
 
@@ -80,54 +79,48 @@ remove_binary() {
 
 # === Remove Aliases ===
 remove_aliases() {
-    log_step "Removing Aliases and Comments" # Updated step title slightly
+    log_step "Removing Aliases"
     local alias_removed_count=0
+    # Use # as sed delimiter because TARGET_PATH contains /
     local escaped_target_path
     escaped_target_path=$(printf '%s\n' "$TARGET_PATH" | sed 's/[\/&]/\\&/g') # Escape / and & for sed regex
 
 
     for rc_file in "${RC_FILES[@]}"; do
         if [ -f "$rc_file" ]; then
-            # Corrected variable name below
-            log_info "Checking for aliases and comments in '$rc_file'..."
-            local file_changed=false # Use this variable consistently
+            log_info "Checking for aliases in '$rc_file'..."
+            local file_changed=false
             local original_checksum
             original_checksum=$(md5sum "$rc_file" 2>/dev/null || cksum "$rc_file") # Get checksum before edit
 
-            # --- First, remove the actual alias lines ---
             for alias_name in "${ALIASES[@]}"; do
+                 # Pattern to match the alias line exactly
+                 # Needs careful escaping for sed. Match start, 'alias', space, name, '=', quote, path, quote, end.
                 local alias_pattern="^alias ${alias_name}='${escaped_target_path}'$"
+
+                # Check if alias exists before attempting removal
                 if grep -qE "$alias_pattern" "$rc_file"; then
                     log_info "Removing alias '$alias_name' from '$rc_file'..."
+                    # Use sed to delete the line matching the pattern.
+                    # Using # as delimiter. Need -i for in-place edit. Add '.bak' for backup on macOS/BSD sed.
+                    # Assuming GNU sed here (common on Linux targeted by original script).
                     if sed -i "\#${alias_pattern}#d" "$rc_file"; then
                        log_success " -> Removed alias line for '$alias_name'."
-                       file_changed=true # Use the consistent variable name
+                       file_changed=true
                        ((alias_removed_count++))
+
+                       # Optional: Attempt to remove the comment line added by the installer *if* it's immediately above
+                       # This is slightly risky if the file structure changed.
+                       # Example using sed to remove comment if previous line matches:
+                       # sed -i "/^# Alias for ${INSTALL_NAME//\ /\\ } (added by installer)$/{N;s/\\n.*//;}" "$rc_file"
+                       # For simplicity, we'll just remove the alias line itself. The comment is harmless.
                     else
                         log_warning " -> Failed to execute sed command for '$alias_name' in '$rc_file'."
                     fi
                 else
-                     log_info "Alias '$alias_name' not found."
+                     log_info "Alias '$alias_name' not found in '$rc_file'."
                 fi
-            done # --- End of inner loop for alias names ---
-
-            # --- Section to remove the comment line ---
-            log_info "Checking for installer comment line..."
-            # Define the exact comment line pattern
-            local comment_pattern="^# Alias for UnifiedUpdater (added by installer)$"
-            if grep -qE "$comment_pattern" "$rc_file"; then
-                 log_info "Removing installer comment line from '$rc_file'..."
-                 # Use sed to delete the line matching the pattern. Using # as delimiter.
-                 if sed -i "\#${comment_pattern}#d" "$rc_file"; then
-                     log_success " -> Removed installer comment line."
-                     file_changed=true # Mark file as changed if sed succeeds
-                 else
-                      log_warning " -> Failed to execute sed command for comment removal in '$rc_file'."
-                 fi
-            else
-                log_info "Installer comment line not found."
-            fi
-            # --- End of section to remove comment ---
+            done
 
             # Check if file actually changed after potential sed operations
             local final_checksum
@@ -136,14 +129,11 @@ remove_aliases() {
                  log_success "Finished checking/modifying '$rc_file'."
             elif [ "$file_changed" = true ]; then
                  log_warning "Sed reported changes, but file content seems unchanged in '$rc_file'."
-            else
-                 # No need to log if no changes were attempted or made
-                 : # No operation / placeholder
             fi
         else
-            log_info "Shell configuration file '$rc_file' not found. Skipping."
+            log_info "Shell configuration file '$rc_file' not found. Skipping alias removal for it."
         fi
-    done # --- End of outer loop for rc_files ---
+    done
 
     if [ "$alias_removed_count" -gt 0 ]; then
         log_warning "Aliases removed. Please reload your shell configuration for changes to take effect."
@@ -159,8 +149,7 @@ echo -e "${BOLD}${CYAN}=== $INSTALL_NAME Uninstaller ===${NC}"
 check_prerequisites || exit 1
 
 # Confirmation Prompt
-# Corrected read prompt formatting
-read -p "$(echo -e ${YELLOW}"\n>>> WARNING: This will remove '$TARGET_PATH' and associated aliases/comments."$NC \
+read -p "$(echo -e ${YELLOW}"\n>>> WARNING: This will remove '$TARGET_PATH' and associated aliases."$NC \
            "\n${YELLOW}>>> Are you sure you want to uninstall? (y/N): "${NC})" confirm
 if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     log_info "Uninstallation cancelled by user."
@@ -172,7 +161,7 @@ remove_binary || log_warning "Proceeding despite issues removing binary file." #
 remove_aliases
 
 echo -e "\n${BOLD}${GREEN}=== Uninstallation Complete ===${NC}"
-log_info "If the binary file and any associated aliases/comments were found, they have been removed."
+log_info "If the binary file and any aliases were found, they have been removed."
 log_info "Remember to reload your shell or open a new terminal."
 echo -e "${BOLD}${CYAN}===============================${NC}"
 
