@@ -259,13 +259,13 @@ main() {
     pm="dnf"
     pm_name="DNF (Fedora)"
     pm_path=$(command -v dnf)
-    # *** MODIFICATION: Use full path for dnf command ***
     update_cmd="$pm_path check-update" # Check first is optional but good practice
     upgrade_cmd="$pm_path upgrade -y"
     autoremove_cmd="$pm_path autoremove -y"
     clean_cache_cmd="$pm_path clean all"
     cache_dir="/var/cache/dnf/"
-    pkg_count_cmd="$pm_path list installed | wc -l"
+    # *** MODIFICATION: Use rpm -qa for package count on Fedora ***
+    pkg_count_cmd="rpm -qa | wc -l"
     CHECK_BOOT_MOUNT=true # Kernel updates common
 
   else
@@ -274,15 +274,21 @@ main() {
   fi
 
   info "Detected package manager: ${CLR_BOLD}$pm_name${CLR_RESET} (Path: $pm_path)"
-  eval "pkg_count=$($pkg_count_cmd)" # Run the command to get count
-  info "Found $pkg_count native packages."
+  # Use eval carefully, ensure pkg_count_cmd is safe
+  if [[ -n "$pkg_count_cmd" ]]; then
+      eval "pkg_count=$($pkg_count_cmd)" # Run the command to get count
+      info "Found $pkg_count native packages."
+  else
+      info "Could not determine package count command."
+  fi
+
 
   # --- Update Phase ---
   info "Starting system update..."
   check_boot_partition # Check /boot mount status if configured/needed
 
 
-  # *** MODIFICATION: Enhanced debugging for package list update ***
+  # *** Debugging block kept, but verbosity logic simplified ***
   info "--- Debug: Checking Environment Before Update ---"
   echo "Running as user: $(whoami)"
   echo "Effective user ID: $EUID"
@@ -299,24 +305,16 @@ main() {
   echo "LC_ALL: ${LC_ALL:-<not set>}"
   info "--- End Debug ---"
 
-  info "Running package list update (with verbosity)..."
+  info "Running package list update..."
   # Create temporary files to capture output
   STDOUT_FILE=$(mktemp)
   STDERR_FILE=$(mktemp)
-  # Determine the command to run, adding verbosity if possible
+
+  # *** MODIFICATION: Removed automatic addition of -v for dnf/apt ***
+  # Just use the base update command defined earlier
   verbose_update_cmd="$update_cmd"
-  if [[ "$pm" == "dnf" || "$pm" == "apt" ]]; then
-      verbose_update_cmd="$pm_path -v ${update_cmd#$pm_path }" # Add -v for dnf/apt
-  elif [[ "$pm" == "pacman" ]]; then
-      # Pacman doesn't have a simple verbosity flag for Syu check part like -v
-      # We rely on its standard output/error
-      verbose_update_cmd="$update_cmd"
-  fi
 
   # Run the command, redirecting stdout and stderr
-  # Use 'script' command if available to better simulate TTY for sudo, if needed
-  # This is an advanced step, try without it first.
-  # Example: $SUDO script -q -c "$verbose_update_cmd" /dev/null > "$STDOUT_FILE" 2> "$STDERR_FILE"
   set +e # Temporarily disable exit on error to capture exit code
   $SUDO $verbose_update_cmd > "$STDOUT_FILE" 2> "$STDERR_FILE"
   CMD_EXIT_CODE=$? # Capture the exit code
@@ -335,11 +333,13 @@ main() {
       # Check for specific DNF exit codes if needed
       # 100 = no updates available (success for check-update)
       # 1 = general error
-      # 0 = success
+      # 0 = success (already handled)
       if [[ "$pm" == "dnf" && "$update_cmd" == *check-update && $CMD_EXIT_CODE -eq 100 ]]; then
            success "$pm_name package list check complete. No updates found."
       else
            error "$pm_name package list update failed (Exit code: $CMD_EXIT_CODE)."
+           # Optionally add more specific error handling based on CMD_EXIT_CODE here
+           # For now, any non-zero and non-100 code is treated as failure.
            exit 1 # Critical step
        fi
   fi
