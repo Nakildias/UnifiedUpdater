@@ -267,11 +267,11 @@ log_info "Auto-Cleanup: ${AUTO_CLEANUP}"
 log_info "Auto-Confirm Upgrades: ${AUTO_CONFIRM_UPGRADES}"
 echo "-----------------------------"
 
-# --- Pre-checks ---
-if [ "$EUID" -eq 0 ]; then
-  log_error "This script should not be run as root. It uses 'sudo' where needed."
-  exit 1
-fi
+## --- Pre-checks ---
+#if [ "$EUID" -eq 0 ]; then
+#  log_error "This script should not be run as root. It uses 'sudo' where needed."
+#  exit 1
+#fi
 
 if ! command -v sudo &> /dev/null; then
     log_error "'sudo' command not found. Please install it."
